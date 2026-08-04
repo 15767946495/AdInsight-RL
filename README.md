@@ -8,9 +8,9 @@
 
 ## English
 
-Reinforcement learning for advertising video selling-point understanding.
+AdInsight-RL is a multimodal large language model designed for advertising video analysis. It watches ad videos, reads the speech transcript, and extracts the core selling points that marketers use to persuade consumers — covering product features, customer value, consumer pain points, practical benefits, and marketing logic.
 
-A multimodal LLM fine-tuned via SFT → RL (GRPO) to analyze advertising videos and extract core selling points. The final model achieves **0.8195** on the official test set (3,108 videos).
+The model is fine-tuned from Qwen3.5-9B through a two-stage pipeline: supervised fine-tuning (SFT) followed by reinforcement learning (GRPO). This repository contains everything needed to deploy the model and reproduce the inference results on the official test set of 3,108 advertising videos.
 
 ### Reproduction Guide
 
@@ -123,9 +123,9 @@ The final model is the step-300 LoRA adapter merged with the base model via `swi
 
 ## 中文
 
-基于强化学习的广告视频卖点理解。
+AdInsight-RL 是一个用于广告视频分析的多模态大语言模型。它能够观看广告视频、阅读语音转录文本，并提取营销人员用来打动消费者的核心卖点——涵盖产品特性、客户价值、消费者痛点、实用价值和营销逻辑。
 
-通过 SFT → RL (GRPO) 两阶段微调的多模态大语言模型，用于分析广告视频并提取核心卖点。最终模型在官方测试集（3,108 个视频）上达到 **0.8195** 的分数。
+该模型基于 Qwen3.5-9B，通过两阶段流程微调而成：监督微调（SFT）+ 强化学习（GRPO）。本仓库包含部署模型并在官方测试集（3,108 个广告视频）上复现推理结果所需的全部内容。
 
 ### 复现指南
 
