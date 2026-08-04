@@ -1,0 +1,14 @@
+# AdInsight-RL: deployment + inference environment
+# Python >= 3.10, CUDA >= 12.4, NVIDIA driver >= 535
+
+# Model serving
+vllm==0.19.1
+torch==2.10.0
+transformers==5.8.1
+
+# ASR generation
+faster-whisper==1.2.1
+av==17.1.0
+
+# Inference client
+aiohttp==3.14.1
