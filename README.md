@@ -106,9 +106,9 @@ Three details distinguish the data pipeline from ordinary teacher filtering. Fir
 
 **SFT and GSPO.** SFT uses 9,500 curated video-QA pairs, LoRA rank 32 / alpha 64, three epochs, and learning rate `2e-5`; it takes approximately 40 minutes on 8× NVIDIA H20 96GB GPUs. GSPO uses 2,902 training and 70 development prompts, eight generations per prompt, sequence-level importance sampling, group reward scaling, and a continuous soft-matching claim reward. It takes approximately 7 h 55 min on 7× H20 GPUs; validation selects step 300.
 
-| Stage | Data | Trainable parameters | Hardware | Duration | Selection |
-|---|---:|---:|---:|---:|---:|
-| SFT | 9,500 | 86.56M (0.91%) | 8× H20 96GB | ~40 min | step 57 |
-| GSPO | 2,902 (+70 dev) | 86.56M (0.91%) | 7× H20 96GB | ~7 h 55 min | step 300 |
+| Stage | Data | Trainable parameters | Hardware | Duration |
+|---|---:|---:|---:|---:|
+| SFT | 9,500 | 86.56M (0.91%) | 8× H20 96GB | ~40 min |
+| GSPO | 2,902 (+70 dev) | 86.56M (0.91%) | 7× H20 96GB | ~7 h 55 min |
 
 **Reward and inference.** The reward combines soft claim-level F1, precision, recall, duplicate penalties, and unsupported-overclaim penalties (see `training/reward_plugin.py`). Inference supplies video and reliability-labeled ASR to vLLM. Deployment uses one tensor-parallel-1 instance per GPU with up to four concurrent sequences; client-side validation enforces 2–4 continuously numbered claims.
