@@ -10,7 +10,7 @@
 
 AdInsight-RL is a multimodal large language model designed for advertising video analysis. It watches ad videos, reads the speech transcript, and extracts the core selling points that marketers use to persuade consumers — covering product features, customer value, consumer pain points, practical benefits, and marketing logic.
 
-The model is fine-tuned from Qwen3.5-9B through a two-stage pipeline: supervised fine-tuning (SFT) followed by reinforcement learning (GRPO). This repository contains everything needed to deploy the model and reproduce the inference results on the official test set of 3,108 advertising videos.
+The model is adapted from Qwen3.5-9B through supervised fine-tuning (SFT) and Group Sequence Policy Optimization (GSPO). This repository contains the components needed to deploy the model and reproduce inference on the official test set of 3,108 advertising videos.
 
 ### Reproduction Guide
 
@@ -98,24 +98,24 @@ AdInsight-RL/
 └── env/requirements.txt
 ```
 
-### Training Process
+### Method Overview
 
-The model was trained in two stages (training data is not included in this package):
+AdInsight-RL uses Qwen3.5-9B (9,496.37M parameters) and trains 86.56M LoRA parameters while freezing the visual encoder and multimodal aligner. Training data is not redistributed in this inference package.
 
-**Stage 1: SFT (Supervised Fine-Tuning)**
-- Base: Qwen3.5-9B (official post-trained checkpoint)
-- Data: 9,500 curated video QA pairs (teacher-generated, judge-filtered, risk-reviewed)
-- Method: LoRA (rank 32, alpha 64, all-linear), 3 epochs, lr 2e-5, freeze vision tower + aligner
-- Best checkpoint selected by eval_loss
+**Evidence-calibrated data.** Video is the primary source of truth; timestamped ASR is an explicitly labeled auxiliary cue. SFT targets are produced by multi-teacher distillation, video verification, and selective risk review. RL references are represented as 2–4 atomic claims with evidence modality and temporal provenance. This construction discourages generic marketing inferences and unsupported numerical or promotional claims.
 
-**Stage 2: RL (Reinforcement Learning — GRPO with sequence-level importance sampling)**
-- Base: SFT merged model
-- Data: 2,902 train / 70 dev samples with atomic reference points (video + question + ASR → reference claims)
-- Reward: claim-level F1 with soft matching + precision + recall components (see `training/reward_plugin.py`)
-- Method: LoRA (rank 32, alpha 64), 1 epoch (414 steps), lr 5e-7, temperature 1.1, beta 0.04
-- 8 generations per prompt, group reward scaling, DeepSpeed ZeRO-2, vLLM colocate
+Three details distinguish the data pipeline from ordinary teacher filtering. First, ASR, generated metadata, and music descriptions are assigned different evidence permissions: video is authoritative, ASR is only a speech cue, and music can support atmosphere but never product facts. Speech intervals are masked before music analysis to prevent spoken product claims from contaminating acoustic evidence. Second, verification is risk-adaptive rather than uniformly repeated: reliable low-risk samples stop early, while numerical, medical, promotional, and disputed claims receive additional review. Third, RL references must pass blind inventory, claim-level audit, conservative adjudication, adversarial challenge, and completeness checking; teacher agreement alone is never sufficient.
 
-The final model is the step-300 LoRA adapter merged with the base model via `swift export --merge_lora true`.
+**Metric-aligned prompting.** Training and inference prompts require one claim per numbered point, answer only the dimensions requested by the question, and omit unsupported details. The same atomic-claim unit is used by generation, parsing, reward computation, and evaluation.
+
+**SFT and GSPO.** SFT uses 9,500 curated video-QA pairs, LoRA rank 32 / alpha 64, three epochs, and learning rate `2e-5`; it takes approximately 40 minutes on 8× NVIDIA H20 96GB GPUs. GSPO uses 2,902 training and 70 development prompts, eight generations per prompt, sequence-level importance sampling, group reward scaling, and a continuous soft-matching claim reward. It takes approximately 7 h 55 min on 7× H20 GPUs; validation selects step 300.
+
+| Stage | Data | Trainable parameters | Hardware | Duration | Selection |
+|---|---:|---:|---:|---:|---:|
+| SFT | 9,500 | 86.56M (0.91%) | 8× H20 96GB | ~40 min | step 57 |
+| GSPO | 2,902 (+70 dev) | 86.56M (0.91%) | 7× H20 96GB | ~7 h 55 min | step 300 |
+
+**Reward and inference.** The reward combines soft claim-level F1, precision, recall, duplicate penalties, and unsupported-overclaim penalties (see `training/reward_plugin.py`). Inference supplies video and reliability-labeled ASR to vLLM. Deployment uses one tensor-parallel-1 instance per GPU with up to four concurrent sequences; client-side validation enforces 2–4 continuously numbered claims.
 
 ---
 
@@ -125,7 +125,7 @@ The final model is the step-300 LoRA adapter merged with the base model via `swi
 
 AdInsight-RL 是一个用于广告视频分析的多模态大语言模型。它能够观看广告视频、阅读语音转录文本，并提取营销人员用来打动消费者的核心卖点——涵盖产品特性、客户价值、消费者痛点、实用价值和营销逻辑。
 
-该模型基于 Qwen3.5-9B，通过两阶段流程微调而成：监督微调（SFT）+ 强化学习（GRPO）。本仓库包含部署模型并在官方测试集（3,108 个广告视频）上复现推理结果所需的全部内容。
+该模型基于 Qwen3.5-9B，通过监督微调（SFT）和组序列策略优化（GSPO）进行适配。本仓库包含部署模型并在官方测试集（3,108 个广告视频）上复现推理结果所需的组件。
 
 ### 复现指南
 
@@ -213,21 +213,21 @@ AdInsight-RL/
 └── env/requirements.txt
 ```
 
-### 训练过程
+### 方法概述
 
-模型分两个阶段训练（训练数据未包含在此包中）：
+AdInsight-RL 使用 Qwen3.5-9B（9,496.37M 参数），冻结视觉编码器与多模态对齐器，仅训练 86.56M LoRA 参数。本推理仓库不重新分发训练数据。
 
-**阶段 1：SFT（监督微调）**
-- 基座：Qwen3.5-9B（官方后训练检查点）
-- 数据：9,500 条精选视频问答对（教师模型生成、裁判过滤、风险审核）
-- 方法：LoRA（rank 32，alpha 64，所有线性层），3 轮，lr 2e-5，冻结视觉编码器 + 对齐层
-- 根据 eval_loss 选择最佳检查点
+**证据校准数据。** 系统将视频设为主要事实来源，将时间戳 ASR 明确标记为辅助信息。SFT 标签通过多教师蒸馏、独立视频复核和选择性风险审核获得；RL 参考答案表示为 2–4 个带证据模态与时间位置的原子声明，从数据层抑制泛化营销推断及无依据的数字、价格和促销描述。
 
-**阶段 2：RL（强化学习 — GRPO，序列级重要性采样）**
-- 基座：SFT 合并后的模型
-- 数据：2,902 训练 / 70 验证样本，含原子级参考要点（视频 + 问题 + ASR → 参考声明）
-- 奖励：声明级 F1，软匹配 + 精确率 + 召回率组合（见 `training/reward_plugin.py`）
-- 方法：LoRA（rank 32，alpha 64），1 轮（414 步），lr 5e-7，temperature 1.1，beta 0.04
-- 每个 prompt 生成 8 个回复，组内奖励缩放，DeepSpeed ZeRO-2，vLLM 共置
+该数据流程具有三个区别于普通教师过滤的设计。第一，ASR、生成式元数据和音乐描述具有不同的证据权限：视频是权威证据，ASR 只能辅助口播内容，音乐只能支持氛围而不能证明产品事实；音乐分析前还会屏蔽 ASR 语音区间，避免口播产品信息污染声学证据。第二，验证采用风险自适应策略而不是统一重复审核：可靠低风险样本提前停止，数字、医疗、促销和争议声明进入额外审查。第三，RL 参考答案必须经过盲式声明盘点、逐声明审计、保守裁决、对抗挑战和完整性检查，教师模型之间达成一致并不足以直接通过。
 
-最终模型是 step-300 的 LoRA 适配器与基座模型合并后的版本，通过 `swift export --merge_lora true` 导出。
+**指标对齐提示词。** 训练和推理提示词要求每个编号点仅包含一个声明，只回答问题要求的维度，并删除无证据细节。生成、解析、奖励和评测均以原子声明为统一单位。
+
+**SFT 与 GSPO。** SFT 使用 9,500 条精选视频问答数据，LoRA rank 32 / alpha 64，训练 3 轮，学习率 `2e-5`；使用 8× NVIDIA H20 96GB，耗时约 40 分钟。GSPO 使用 2,902 条训练数据和 70 条验证数据，每个问题采样 8 个回答，采用序列级重要性采样、组级奖励缩放和连续软匹配声明奖励；使用 7× H20，耗时约 7 小时 55 分钟，最终根据验证奖励选择 step 300。
+
+| 阶段 | 数据 | 可训练参数 | 硬件 | 训练时长 | 最佳检查点 |
+|---|---:|---:|---:|---:|---:|
+| SFT | 9,500 | 86.56M（0.91%） | 8× H20 96GB | 约 40 分钟 | step 57 |
+| GSPO | 2,902（+70 验证） | 86.56M（0.91%） | 7× H20 96GB | 约 7 小时 55 分钟 | step 300 |
+
+**奖励与推理。** 奖励函数组合软匹配声明级 F1、Precision、Recall、重复惩罚和无依据扩张惩罚（见 `training/reward_plugin.py`）。推理阶段将视频与带可靠性标记的 ASR 输入 vLLM；每张 GPU 部署一个 TP=1 实例、最多并发 4 个序列，客户端质量门约束输出为 2–4 个连续编号的原子声明。
