@@ -14,6 +14,9 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     questions = load(args.questions)
+    expected = [q["id"] for q in questions]
+    if len(expected) != len(set(expected)):
+        raise ValueError("question IDs are not unique")
     results = {}
     for path in args.shard:
         for row in load(path):
@@ -21,15 +24,22 @@ def main():
             if rid in results:
                 raise ValueError(f"duplicate id: {rid}")
             results[rid] = {"id": rid, "model_prediction": str(row["model_prediction"]).strip()}
-    expected = [q["id"] for q in questions]
     missing = set(expected) - set(results)
     extra = set(results) - set(expected)
-    assert not missing and not extra and len(results) == len(expected), \
-        f"coverage: {len(results)}/{len(expected)} missing={len(missing)} extra={len(extra)}"
+    if missing or extra or len(results) != len(expected):
+        raise ValueError(
+            f"coverage: {len(results)}/{len(expected)} missing={len(missing)} extra={len(extra)}"
+        )
     for rid in expected:
         answer = results[rid]["model_prediction"]
         nums = [int(v) for v in re.findall(r"(?m)^\s*(\d+)\.\s+", answer)]
-        assert answer and nums == list(range(1, len(nums)+1)) and len(nums) <= 4, f"bad format: {rid}"
+        if (
+            not answer
+            or "ERROR:" in answer
+            or nums != list(range(1, len(nums) + 1))
+            or not 2 <= len(nums) <= 4
+        ):
+            raise ValueError(f"bad format: {rid}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     tmp = args.output.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as f:

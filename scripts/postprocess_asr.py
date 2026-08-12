@@ -74,12 +74,36 @@ def main():
     parser = argparse.ArgumentParser(description="Post-process raw ASR transcripts")
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--videos", type=Path, required=True)
+    parser.add_argument("--questions", type=Path, help="Question JSONL used to enforce ID coverage and order")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--merge-gap", type=float, default=0.5)
     parser.add_argument("--max-chars", type=int, default=12000)
     args = parser.parse_args()
+    if not 1 <= args.max_chars <= 12000:
+        parser.error("max-chars must be between 1 and 12000")
 
+    args.input = args.input.expanduser().resolve()
+    args.videos = args.videos.expanduser().resolve()
+    args.output = args.output.expanduser().resolve()
     rows = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines() if line.strip()]
+    indexed: dict[str, dict] = {}
+    for row in rows:
+        video_name = row.get("video", "")
+        if not video_name:
+            raise ValueError("ASR row is missing video")
+        if video_name in indexed:
+            raise ValueError(f"duplicate ASR video: {video_name}")
+        if row.get("error"):
+            raise ValueError(f"ASR generation failed for {video_name}: {row['error']}")
+        indexed[video_name] = row
+    if args.questions:
+        questions = [json.loads(line) for line in args.questions.read_text(encoding="utf-8").splitlines() if line.strip()]
+        expected = [f"{row['id']}.mp4" for row in questions]
+        missing = set(expected) - set(indexed)
+        extra = set(indexed) - set(expected)
+        if missing or extra or len(indexed) != len(expected):
+            raise ValueError(f"ASR coverage mismatch: missing={len(missing)} extra={len(extra)}")
+        rows = [indexed[name] for name in expected]
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     with args.output.open("w", encoding="utf-8") as writer:
@@ -100,10 +124,18 @@ def main():
             lines = [f'[{s["start"]:07.2f}-{s["end"]:07.2f}] {s["text"]}' for s in segments]
             transcript = "\n".join(lines)
             if len(transcript) > args.max_chars:
-                transcript = transcript[:args.max_chars].rsplit("\n", 1)[0]
+                kept = []
+                used = 0
+                for segment, line in zip(segments, lines):
+                    required = len(line) + (1 if kept else 0)
+                    if used + required > args.max_chars:
+                        break
+                    kept.append(segment)
+                    used += required
+                segments = kept
                 reliability = "low"
             if not segments:
-                transcript = "No usable automatic transcript is available."
+                reliability = "unavailable"
             writer.write(json.dumps({
                 "video": video_name,
                 "audio_to_text": segments,

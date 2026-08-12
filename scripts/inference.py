@@ -29,12 +29,17 @@ def load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def asr_index(path: Path) -> dict[str, list[dict]]:
+def asr_index(path: Path) -> dict[str, dict]:
     result = {}
     for row in load_jsonl(path):
         stem = Path(row.get("video", "")).stem
         if stem:
-            result[stem] = row.get("audio_to_text", [])
+            if stem in result:
+                raise ValueError(f"duplicate ASR id: {stem}")
+            result[stem] = {
+                "segments": row.get("audio_to_text", []),
+                "reliability": row.get("reliability"),
+            }
     return result
 
 
@@ -75,8 +80,8 @@ def validate_answer(text: str) -> list[str]:
     numbers = [int(v) for v in re.findall(r"(?m)^\s*(\d+)\.\s+", stripped)]
     if not numbers or numbers != list(range(1, len(numbers) + 1)):
         issues.append("numbering not continuous")
-    if len(numbers) > 4:
-        issues.append("more than 4 points")
+    if not 2 <= len(numbers) <= 4:
+        issues.append("must contain 2-4 points")
     return issues
 
 
@@ -86,7 +91,7 @@ async def call_model(session, base_url, model_name, video_path, system_prompt, u
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
-                {"type": "video_url", "video_url": {"url": f"file://{video_path}"}},
+                {"type": "video_url", "video_url": {"url": video_path.resolve().as_uri()}},
                 {"type": "text", "text": user_text},
             ]},
         ],
@@ -112,13 +117,22 @@ async def call_model(session, base_url, model_name, video_path, system_prompt, u
 async def run_shard(args):
     questions = load_jsonl(args.questions)
     asr = asr_index(args.asr)
-    system_prompt = SYSTEM_PROMPT.read_text(encoding="utf-8").strip()
+    system_prompt = args.system_prompt.read_text(encoding="utf-8").strip()
     video_dir = args.videos
 
     selected = [q for i, q in enumerate(questions) if i % args.num_shards == args.shard]
+    selected_ids = {q["id"] for q in selected}
+    missing_videos = [qid for qid in selected_ids if not (video_dir / f"{qid}.mp4").is_file()]
+    if missing_videos:
+        raise FileNotFoundError(f"missing {len(missing_videos)} shard video(s), first: {missing_videos[0]}")
     existing = {}
     if args.resume and args.output.exists():
-        existing = {r["id"]: r for r in load_jsonl(args.output) if r.get("model_prediction")}
+        existing = {
+            r["id"]: r for r in load_jsonl(args.output)
+            if r.get("id") in selected_ids
+            and r.get("model_prediction")
+            and not str(r["model_prediction"]).startswith("ERROR:")
+        }
         selected = [q for q in selected if q["id"] not in existing]
 
     print(f"shard {args.shard}: {len(selected)} pending, {len(existing)} existing")
@@ -135,8 +149,11 @@ async def run_shard(args):
             question = item["question"]
             async with semaphore:
                 video_path = video_dir / f"{qid}.mp4"
-                segments = asr.get(qid, [])
+                asr_row = asr.get(qid, {"segments": [], "reliability": None})
+                segments = asr_row["segments"]
                 reliability, transcript = build_transcript(segments)
+                if asr_row["reliability"] in {"low", "medium", "high", "unavailable"}:
+                    reliability = asr_row["reliability"]
                 user_text = (
                     f"QUESTION\n{question}\n\n"
                     f"SPEECH TRANSCRIPT (automatic, reliability: {reliability})\n{transcript}\n\n"
@@ -164,6 +181,10 @@ async def run_shard(args):
                         else:
                             answer = f"ERROR: {exc}"
                             break
+                if not answer.startswith("ERROR:"):
+                    final_issues = validate_answer(answer)
+                    if final_issues:
+                        answer = f"ERROR: invalid answer after 3 attempts: {'; '.join(final_issues)}"
                 async with lock:
                     results[qid] = {"id": qid, "model_prediction": answer}
                     ordered = [results[q["id"]] for q in questions if q["id"] in results]
@@ -174,6 +195,9 @@ async def run_shard(args):
                     tmp.replace(args.output)
 
         await asyncio.gather(*(worker(q) for q in selected))
+    failed = [qid for qid, row in results.items() if str(row["model_prediction"]).startswith("ERROR:")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} inference request(s) failed, first: {failed[0]}")
     print(f"shard {args.shard}: wrote {len(results)} rows to {args.output}")
 
 
@@ -185,6 +209,7 @@ def main():
     parser.add_argument("--questions", type=Path, required=True)
     parser.add_argument("--asr", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--system-prompt", type=Path, default=SYSTEM_PROMPT)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--workers", type=int, default=4)
@@ -193,7 +218,22 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", action="store_true")
-    asyncio.run(run_shard(parser.parse_args()))
+    args = parser.parse_args()
+    if args.num_shards < 1 or not 0 <= args.shard < args.num_shards:
+        parser.error("require num-shards >= 1 and 0 <= shard < num-shards")
+    if args.workers < 1:
+        parser.error("workers must be positive")
+    args.videos = args.videos.expanduser().resolve()
+    args.questions = args.questions.expanduser().resolve()
+    args.asr = args.asr.expanduser().resolve()
+    args.output = args.output.expanduser().resolve()
+    args.system_prompt = args.system_prompt.expanduser().resolve()
+    for path in (args.questions, args.asr, args.system_prompt):
+        if not path.is_file():
+            parser.error(f"file not found: {path}")
+    if not args.videos.is_dir():
+        parser.error(f"video directory not found: {args.videos}")
+    asyncio.run(run_shard(args))
 
 
 if __name__ == "__main__":

@@ -2,113 +2,190 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
----
+AdInsight-RL is a multimodal model for advertising video analysis. It is adapted from Qwen3.5-9B with SFT and GSPO and extracts selling points, customer value, consumer pain points, practical benefits, and marketing logic from videos with auxiliary ASR evidence.
 
-AdInsight-RL is a multimodal large language model designed for advertising video analysis. It watches ad videos, reads the speech transcript, and extracts the core selling points that marketers use to persuade consumers — covering product features, customer value, consumer pain points, practical benefits, and marketing logic.
+This repository reproduces **all 3,108 final inference results from the official test videos and the released final weights**. It does not reproduce SFT or GSPO training.
 
-The model is adapted from Qwen3.5-9B through supervised fine-tuning (SFT) and Group Sequence Policy Optimization (GSPO). This repository contains the components needed to deploy the model and reproduce inference on the official test set of 3,108 advertising videos.
+## Frozen Resources
 
-### Reproduction Guide
+Use these immutable revisions to prevent upstream updates from changing results:
 
-#### Step 1: Install
+| Resource | Repository | Revision |
+|---|---|---|
+| AdInsight-RL | [Harris15767946495/AdInsight-RL](https://huggingface.co/Harris15767946495/AdInsight-RL) | `f386fe576b551a6345b1a96a014ab7248bfb40a8` |
+| faster-whisper | [deepdml/faster-whisper-large-v3-turbo-ct2](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2) | `4df90f75321148c3a29a9e2351b7ddf8f5b115a8` |
+
+Frozen repository data hashes:
+
+```text
+abe741d997ac467f1444255d7123228603a942cd7843bd364bb6f1fef3044e9a  data/MAC_QA.jsonl
+83d7f0cc4f1b8dc939a8b38840d05caa043fe9e29d511bce111c08983c10188a  data/asr_reference.jsonl
+```
+
+## Requirements
+
+- Python 3.10–3.13
+- CUDA >= 12.4 and NVIDIA driver >= 535
+- At least one NVIDIA GPU with >= 24 GB VRAM
+- `ffmpeg`, `curl`, and `nvidia-smi`
+
+Install from the repository root:
 
 ```bash
-pip install -r env/requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r env/requirements.txt
 ```
 
-Requires: Python ≥ 3.10, CUDA ≥ 12.4, NVIDIA driver ≥ 535, at least 1 GPU with ≥ 24GB VRAM.
+## Data Layout
 
-#### Step 2: Download the models
+The official test videos are not redistributed by this repository. Put all 3,108 videos in one directory, named `<question-id>.mp4`:
 
-Download the main model and the ASR model from HuggingFace:
+```text
+videos/
+├── 1d9c3227-2002-4aae-b6c1-57c44c2ef914.mp4
+├── 4325fcae-87c4-420c-a1e7-83a27a21c75d.mp4
+└── ...
+```
 
-- **Main model (LLM)**: [Harris15767946495/AdInsight-RL](https://huggingface.co/Harris15767946495/AdInsight-RL)
-- **ASR model (Whisper)**: [deepdml/faster-whisper-large-v3-turbo-ct2](https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2)
-
-Then set the environment variables:
+The examples below use configurable relative paths:
 
 ```bash
-export ADINSIGHT_MODEL=/path/to/AdInsight-RL
-export ADINSIGHT_MODEL_NAME=AdInsight-RL-Step300
-export ADINSIGHT_VIDEO_DIR=/path/to/mars2_videos
-export WHISPER_MODEL=/path/to/faster-whisper-large-v3-turbo-ct2
+VIDEO_DIR=../mars2_videos
+WORK_DIR=../adinsight_work
+MODEL_DIR="$WORK_DIR/models/AdInsight-RL"
+ASR_MODEL_DIR="$WORK_DIR/models/faster-whisper-large-v3-turbo-ct2"
+mkdir -p "$WORK_DIR/models" "$WORK_DIR/asr" "$WORK_DIR/outputs" "$WORK_DIR/logs"
 ```
 
-#### Step 3: Deploy the model
+Every data, model, log, and output path is accepted through CLI arguments. Run any script with `--help` for all options.
+
+## Step 1: Download Frozen Weights
 
 ```bash
-bash scripts/deploy.sh
+hf download Harris15767946495/AdInsight-RL \
+  --revision f386fe576b551a6345b1a96a014ab7248bfb40a8 \
+  --local-dir "$MODEL_DIR"
+
+hf download deepdml/faster-whisper-large-v3-turbo-ct2 \
+  --revision 4df90f75321148c3a29a9e2351b7ddf8f5b115a8 \
+  --local-dir "$ASR_MODEL_DIR"
 ```
 
-Auto-detects available GPUs and starts one vLLM service per GPU. Override:
+## Step 2: Prepare ASR
+
+### Option A: Generate from videos
+
+Run ASR before deploying vLLM so the models do not compete for GPU memory.
 
 ```bash
-NUM_GPUS=4 bash scripts/deploy.sh   # use only 4 GPUs
+bash scripts/run_asr.sh \
+  --videos "$VIDEO_DIR" \
+  --questions data/MAC_QA.jsonl \
+  --model "$ASR_MODEL_DIR" \
+  --model-revision 4df90f75321148c3a29a9e2351b7ddf8f5b115a8 \
+  --raw-dir "$WORK_DIR/asr/raw" \
+  --output "$WORK_DIR/asr/asr_final.jsonl" \
+  --num-gpus 4
 ```
 
-#### Step 4: Generate ASR (or use the reference)
+Any transcription failure returns a nonzero exit code. After correcting the cause, add `--resume` to reuse successful records only.
 
-ASR is a key auxiliary input — the model uses video as primary evidence and ASR transcript as supporting evidence.
-
-**Option A: Generate from scratch** (auto-detects GPU count, supports resume):
+### Option B: Use frozen reference ASR
 
 ```bash
-bash scripts/run_asr.sh
-# → data/asr_final.jsonl (3,108 rows)
+ASR_FILE=data/asr_reference.jsonl
+python scripts/preflight.py inference \
+  --questions data/MAC_QA.jsonl \
+  --videos "$VIDEO_DIR" \
+  --asr "$ASR_FILE"
 ```
 
-**Option B: Use the provided reference ASR**:
+For option A, set:
 
 ```bash
-cp data/asr_reference.jsonl data/asr_final.jsonl
+ASR_FILE="$WORK_DIR/asr/asr_final.jsonl"
 ```
 
-#### Step 5: Run inference
+## Step 3: Deploy
 
 ```bash
-bash scripts/run_inference.sh
-# → outputs/submission.jsonl (3,108 rows, official format)
+bash scripts/deploy.sh \
+  --model "$MODEL_DIR" \
+  --model-name AdInsight-RL-Step300 \
+  --model-revision f386fe576b551a6345b1a96a014ab7248bfb40a8 \
+  --video-dir "$VIDEO_DIR" \
+  --log-dir "$WORK_DIR/logs" \
+  --base-port 8240 \
+  --num-gpus 4
 ```
 
-Auto-detects GPU count, runs N shards in parallel, merges into official format: `{"id":"...","model_prediction":"1. ..."}`. Supports `--resume` per shard.
+The script starts one TP=1 vLLM service per GPU and returns only after every service passes its health check.
 
-### Project Structure
+## Step 4: Infer and Write Verification Manifest
 
+```bash
+bash scripts/run_inference.sh \
+  --questions data/MAC_QA.jsonl \
+  --asr "$ASR_FILE" \
+  --videos "$VIDEO_DIR" \
+  --output-dir "$WORK_DIR/outputs" \
+  --output results/submission.jsonl \
+  --manifest results/submission.manifest.json \
+  --model-name AdInsight-RL-Step300 \
+  --model-source "$MODEL_DIR" \
+  --model-revision f386fe576b551a6345b1a96a014ab7248bfb40a8 \
+  --base-port 8240 \
+  --num-gpus 4
 ```
+
+Before inference, the pipeline verifies complete coverage of all 3,108 questions, videos, and ASR records. Final merging succeeds only when:
+
+- there are no missing, duplicate, or extra IDs;
+- no prediction is empty or contains `ERROR`;
+- every answer has 2–4 continuously numbered points;
+- output order matches `MAC_QA.jsonl`.
+
+`submission.manifest.json` records the model revision, SHA256 hashes of every input, prompt, and output, and all inference parameters. It does not record machine-specific absolute paths.
+
+## Final Review Package
+
+The review link must contain at least:
+
+- this complete code repository;
+- complete weights at the frozen revisions above;
+- `data/MAC_QA.jsonl` and `data/asr_reference.jsonl`;
+- `results/submission.jsonl`;
+- `results/submission.manifest.json`;
+- instructions and licensing information for obtaining the official test videos.
+
+The repository does not fabricate a placeholder submission. Before publishing the final review link, run the real released weights and commit both generated files under `results/`.
+
+## Project Structure
+
+```text
 AdInsight-RL/
 ├── scripts/
-│   ├── deploy.sh              # ① deploy model with vLLM (auto GPU count)
-│   ├── run_asr.sh             # ② ASR generation (auto GPU count, resume)
-│   ├── generate_asr.py        #   faster-whisper transcription (with --resume)
-│   ├── postprocess_asr.py     #   merge segments, fix EOF, reliability
-│   ├── run_inference.sh       # ③ parallel inference + merge (auto GPU count)
-│   ├── inference.py           #   video + ASR → model → answer (with --resume)
-│   └── merge_shards.py        #   merge → official submission format
-├── training/
-│   └── reward_plugin.py       # RL reward function (reference)
-├── prompts/
-│   └── final_answer.txt       # system prompt
-├── data/
-│   ├── MAC_QA.jsonl           # official test set (3,108 questions)
-│   └── asr_reference.jsonl    # frozen ASR reference (3,108 rows)
+│   ├── deploy.sh              # CLI-configured vLLM deployment
+│   ├── run_asr.sh             # sharded ASR generation, merge, validation
+│   ├── generate_asr.py        # faster-whisper transcription
+│   ├── postprocess_asr.py     # ASR post-processing and coverage checks
+│   ├── preflight.py           # question, video, and ASR validation
+│   ├── run_inference.sh       # parallel inference and exact shard merge
+│   ├── inference.py           # video + ASR inference client
+│   ├── merge_shards.py        # final format and coverage validation
+│   ├── run_metadata.py        # input/model hashes and resume fingerprint
+│   └── write_manifest.py      # verifiable result manifest
+├── prompts/final_answer.txt
+├── data/MAC_QA.jsonl
+├── data/asr_reference.jsonl
+├── results/                   # final submission and manifest
 └── env/requirements.txt
 ```
 
-### Method Overview
+## Method Overview
 
-AdInsight-RL uses Qwen3.5-9B (9,496.37M parameters) and trains 86.56M LoRA parameters while freezing the visual encoder and multimodal aligner. Training data is not redistributed in this inference package.
+AdInsight-RL uses Qwen3.5-9B and trains 86.56M LoRA parameters while freezing the visual encoder and multimodal aligner. SFT uses 9,500 curated video-QA pairs with LoRA rank 32 / alpha 64 for three epochs at `2e-5`. GSPO uses 2,902 training and 70 validation prompts with eight generations per prompt; validation selects step 300.
 
-**Evidence-calibrated data.** Video is the primary source of truth; timestamped ASR is an explicitly labeled auxiliary cue. SFT targets are produced by multi-teacher distillation, video verification, and selective risk review. RL references are represented as 2–4 atomic claims with evidence modality and temporal provenance. This construction discourages generic marketing inferences and unsupported numerical or promotional claims.
-
-Three details distinguish the data pipeline from ordinary teacher filtering. First, ASR, generated metadata, and music descriptions are assigned different evidence permissions: video is authoritative, ASR is only a speech cue, and music can support atmosphere but never product facts. Speech intervals are masked before music analysis to prevent spoken product claims from contaminating acoustic evidence. Second, verification is risk-adaptive rather than uniformly repeated: reliable low-risk samples stop early, while numerical, medical, promotional, and disputed claims receive additional review. Third, RL references must pass blind inventory, claim-level audit, conservative adjudication, adversarial challenge, and completeness checking; teacher agreement alone is never sufficient.
-
-**Metric-aligned prompting.** Training and inference prompts require one claim per numbered point, answer only the dimensions requested by the question, and omit unsupported details. The same atomic-claim unit is used by generation, parsing, reward computation, and evaluation.
-
-**SFT and GSPO.** SFT uses 9,500 curated video-QA pairs, LoRA rank 32 / alpha 64, three epochs, and learning rate `2e-5`; it takes approximately 40 minutes on 8× NVIDIA H20 96GB GPUs. GSPO uses 2,902 training and 70 development prompts, eight generations per prompt, sequence-level importance sampling, group reward scaling, and a continuous soft-matching claim reward. It takes approximately 7 h 55 min on 7× H20 GPUs; validation selects step 300.
-
-| Stage | Data | Trainable parameters | Hardware | Duration |
-|---|---:|---:|---:|---:|
-| SFT | 9,500 | 86.56M (0.91%) | 8× H20 96GB | ~40 min |
-| GSPO | 2,902 (+70 dev) | 86.56M (0.91%) | 7× H20 96GB | ~7 h 55 min |
-
-**Reward and inference.** The reward combines soft claim-level F1, precision, recall, duplicate penalties, and unsupported-overclaim penalties (see `training/reward_plugin.py`). Inference supplies video and reliability-labeled ASR to vLLM. Deployment uses one tensor-parallel-1 instance per GPU with up to four concurrent sequences; client-side validation enforces 2–4 continuously numbered claims.
+Training data construction uses multi-teacher distillation, independent video verification, risk review, speech-masked music analysis, and atomic-claim audits. `training/reward_plugin.py` provides the soft claim-matching reward as a method reference, but the training data and full retraining pipeline are outside this inference reproduction package.

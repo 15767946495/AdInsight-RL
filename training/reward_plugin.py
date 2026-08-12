@@ -22,7 +22,7 @@ Invalid numbered-list formatting receives zero reward.
 
 Usage in swift rlhf:
     --reward_funcs mac_claim_f1 \
-    --external_plugins /data/tec-chi/MARS2/MAC/rl/reward_plugin.py
+    --external_plugins training/reward_plugin.py
 """
 
 from __future__ import annotations
@@ -509,4 +509,3 @@ if __name__ == "__main__":
         predicted, 3)
     assert abs(two_v_one["tp"] - 0.9) < 1e-9, "strongest match must win the shared reference"
     print("ok: soft-match + multi-component + overclaim self-check passed")
-
